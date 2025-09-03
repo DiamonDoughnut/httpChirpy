@@ -33,6 +33,7 @@ type User struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
 	Token	  string	`json:"token"`
+	RefreshToken string `json:"refresh_token"`
 }
 
 func main() {
@@ -55,10 +56,14 @@ func main() {
 	mux.HandleFunc("POST /api/chirps", apiCfg.handlerCreateChirp)
 	mux.HandleFunc("GET /api/chirps", apiCfg.handlerGetChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handlerGetChirpById)
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.handlerDeleteChirp)
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerMetrics)
 	mux.HandleFunc("POST /admin/reset", apiCfg.handlerReset)
 	mux.HandleFunc("POST /api/users", apiCfg.handlerRegister)
 	mux.HandleFunc("POST /api/login", apiCfg.handlerLogin)
+	mux.HandleFunc("PUT /api/users", apiCfg.handlerPutUsers)
+	mux.HandleFunc("POST /api/refresh", apiCfg.handlerRefresh)
+	mux.HandleFunc("POST /api/revoke", apiCfg.handlerRevoke)
 	// Configure and start HTTP server
 	srv := http.Server{
 		Addr: ":8080",
@@ -123,6 +128,11 @@ func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	userId, err := auth.ValidateJWT(bearerToken, cfg.secretKey)
+	if err != nil {
+		log.Printf("Error validating bearer token: %s", err.Error())
+		marshallError(w, err, 401)
+		return
+	}
 	// Validate chirp length (140 character limit)
 	respBody, err := validate(params)
 	if err != nil {
@@ -131,7 +141,7 @@ func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	// Create chirp in database
-	chirp, err := cfg.databaseQueries.CreateChirp(r.Context(), database.CreateChirpParams{Body: respBody, UserID: cfg.userId})
+	chirp, err := cfg.databaseQueries.CreateChirp(r.Context(), database.CreateChirpParams{Body: respBody, UserID: userId})
 	if err != nil {
 		log.Printf("Error creating chirp: %s", err.Error())
 		marshallError(w, err, 500)
@@ -207,7 +217,6 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
 		Email string `json:"email"`
 		Password string `json:"password"`
-		ExpiresInSeconds int `json:"expires_in_seconds"`
 	}
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
@@ -230,16 +239,33 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 		marshallError(w, err, 401)
 		return
 	}
-	if params.ExpiresInSeconds == 0 || params.ExpiresInSeconds > 3600 {
-		params.ExpiresInSeconds = 3600
+	token, err := auth.MakeJWT(user.ID, cfg.secretKey, time.Duration(1 * int(time.Hour)))
+	if err != nil {
+		log.Printf("Error making new JWT token: %s", err.Error())
+		marshallError(w, err, 500)
+		return
 	}
-	token, err := auth.MakeJWT(user.ID, cfg.secretKey, time.Duration(params.ExpiresInSeconds * int(time.Second)))
+	refreshTokenString, err := auth.MakeRefreshToken()
+	if err != nil {
+		log.Printf("Error making refresh token: %s", err.Error())
+		marshallError(w, err, 500)
+		return
+	}
+	refreshTokenExp := time.Now().Add(time.Hour * 24 * 60).UTC()
+	refreshToken := database.CreateRefreshTokenParams{UserID: user.ID, Token: refreshTokenString, ExpiresAt: refreshTokenExp}
+	_, err = cfg.databaseQueries.CreateRefreshToken(r.Context(), refreshToken)
+	if err != nil {
+		log.Printf("Error creating refresh token: %s", err.Error())
+		marshallError(w, err, 500)
+		return
+	}
 	response := User{
 		ID: user.ID,
 		Email: user.Email,
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
 		Token: token,
+		RefreshToken: refreshTokenString,
 	}
 	cfg.userId = user.ID
 	// Marshal response to JSON
@@ -302,6 +328,17 @@ func (cfg *apiConfig) handlerRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
+	tokenAuth, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("Error getting bearer token (handlerGetChirps): %s", err.Error())
+		marshallError(w, err, 401)
+	}
+	_, err = auth.ValidateJWT(tokenAuth, cfg.secretKey)
+	if err != nil {
+		log.Printf("Error validating JWT token: %s", err.Error())
+		marshallError(w, err, 401)
+		return
+	}
 	chirps, err := cfg.databaseQueries.GetChirps(r.Context())
 	if err != nil {
 		log.Printf("Error getting chirps: %s", err.Error())
@@ -370,4 +407,155 @@ func (cfg *apiConfig) handlerGetChirpById(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	w.Write(dat)
+}
+
+func (cfg *apiConfig) handlerRefresh (w http.ResponseWriter, r *http.Request) {
+	reqToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("Error getting bearer token (handlerRefresh): %s", err.Error())
+		marshallError(w, err, 401)
+		return
+	}
+	token, err := cfg.databaseQueries.GetRefreshToken(r.Context(), reqToken)
+	if err != nil{
+		marshallError(w, err, 401)
+		return
+	}
+	newJWT, err := auth.MakeJWT(token.UserID, cfg.secretKey, time.Hour)
+	if err != nil {
+		marshallError(w, err, 500)
+		return
+	}
+	type response struct {
+		Token string `json:"token"`
+	}
+	resp := response{
+		Token: newJWT,
+	}
+	res, err := json.Marshal(resp)
+	if err != nil {
+		marshallError(w, err, 500)
+		return
+	}
+	w.Header().Add("Content-Type", "application/json")
+	w.WriteHeader(200)
+	w.Write(res)
+}
+
+func (cfg *apiConfig) handlerRevoke (w http.ResponseWriter, r *http.Request) {
+	reqToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("Error getting bearer token (handlerRevoke): %s", err.Error())
+		marshallError(w, err, 401)
+		return
+	}
+	err = cfg.databaseQueries.RevokeRefreshToken(r.Context(), reqToken)
+	if err != nil {
+		marshallError(w, err, 500)
+		return
+	}
+	w.WriteHeader(204)
+}
+
+func (cfg *apiConfig) handlerPutUsers (w http.ResponseWriter, r *http.Request) {
+	reqToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("Error getting bearer token (handlerPutUsers): %s", err.Error())
+		marshallError(w, err, 401)
+		return
+	}
+	userId, err := auth.ValidateJWT(reqToken, cfg.secretKey)
+	if err != nil {
+		log.Printf("Error validating JWT token: %s", err.Error())
+		marshallError(w, err, 401)
+		return
+	}
+	if userId != cfg.userId {
+		marshallError(w, fmt.Errorf("token does not match current user"), 401)
+		return
+	}
+	type parameters struct {
+		Email string `json:"email"`
+		Password string `json:"password"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err = decoder.Decode(&params)
+	if err != nil {
+		log.Printf("Error decoding parameters: %s", err.Error())
+		marshallError(w, err, 500)
+		return
+	}
+	if cfg.platform != "dev" {
+		log.Printf("Error: update endpoint only available in dev mode")
+		marshallError(w, err, 403)
+	}
+	hashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		log.Printf("Error hashing password: %s", err.Error())
+		marshallError(w, err, 500)
+		return
+	}
+	user, err := cfg.databaseQueries.PutNewUserData(r.Context(), database.PutNewUserDataParams{Email: params.Email, HashedPassword: hashedPassword, ID: userId})
+	if err != nil {
+		log.Printf("Error updating user: %s", err.Error())
+		marshallError(w, err, 500)
+		return
+	}
+	data := User{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+	}
+	newUser, err := json.Marshal(data)
+	if err != nil {
+		log.Printf("Error marshalling response body: %s", err.Error())
+		marshallError(w, err, 500)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	w.Write(newUser)
+}
+
+func (cfg *apiConfig) handlerDeleteChirp (w http.ResponseWriter, r *http.Request) {
+	reqToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("Error getting bearer token (handlerPutUsers): %s", err.Error())
+		marshallError(w, err, 401)
+		return
+	}
+	userId, err := auth.ValidateJWT(reqToken, cfg.secretKey)
+	if err != nil {
+		log.Printf("Error validating JWT token: %s", err.Error())
+		marshallError(w, err, 401)
+		return
+	}
+	cfg.userId = userId
+	pathValue := r.PathValue("chirpID")
+	path, err := uuid.Parse(pathValue)
+	if err != nil {
+		log.Printf("Error parsing chirp ID: %s", err.Error())
+		marshallError(w, err, 400)
+		return
+	}
+	chirp, err := cfg.databaseQueries.GetChirpById(r.Context(), path)
+	if err != nil {
+		log.Printf("Error finding chirp for deletion: %s", err.Error())
+		marshallError(w, err, 404)
+		return
+	}
+	if cfg.userId != chirp.UserID{
+		log.Printf("Not Authorized to delete chirp")
+		marshallError(w, fmt.Errorf("no authorization to delete chirp"), 403)
+		return
+	}
+	err = cfg.databaseQueries.DeleteChirpById(r.Context(), database.DeleteChirpByIdParams{ID: path, UserID: userId})
+	if err != nil {
+		log.Printf("Error deleting chirp: %s", err.Error())
+		marshallError(w, err, 500)
+		return
+	}
+	w.WriteHeader(204)
 }

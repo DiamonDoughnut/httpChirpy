@@ -1,0 +1,200 @@
+// Package auth provides comprehensive unit tests for authentication functionality.
+// These tests ensure the reliability and security of JWT token operations and password handling.
+//
+// PRODUCTION TEST IMPROVEMENTS:
+// - Add property-based testing for edge cases
+// - Implement benchmark tests for performance validation
+// - Add integration tests with real database
+// - Test concurrent token operations
+// - Add security-focused tests (timing attacks, etc.)
+// - Implement test coverage reporting
+package auth
+
+import (
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// TestMakeJWT verifies that JWT token creation works correctly.
+// Tests basic functionality of creating a valid JWT token with proper claims.
+//
+// PRODUCTION IMPROVEMENTS:
+// - Test with various expiration times
+// - Verify all JWT claims are set correctly
+// - Test with different user ID formats
+// - Add negative tests with invalid inputs
+func TestMakeJWT(t *testing.T) {
+	// Arrange: Set up test data
+	userID := uuid.New()
+	secret := "test-secret"
+	expiresIn := time.Hour
+
+	// Act: Create JWT token
+	token, err := MakeJWT(userID, secret, expiresIn)
+
+	// Assert: Verify results
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	if token == "" {
+		t.Fatal("Expected token to be non-empty")
+	}
+
+	// PRODUCTION: Add more detailed token structure validation
+	// - Verify token has 3 parts (header.payload.signature)
+	// - Decode and verify claims without validation
+}
+
+// TestValidateJWT tests the complete JWT lifecycle (create -> validate).
+// Ensures that tokens created by MakeJWT can be successfully validated
+// and return the correct user ID.
+//
+// PRODUCTION IMPROVEMENTS:
+// - Test token validation with different secrets
+// - Test validation of tokens from external sources
+// - Verify all claims are validated correctly
+// - Test clock skew scenarios
+func TestValidateJWT(t *testing.T) {
+	// Arrange: Create a valid token
+	userID := uuid.New()
+	secret := "test-secret"
+	expiresIn := time.Hour
+
+	token, err := MakeJWT(userID, secret, expiresIn)
+	if err != nil {
+		t.Fatalf("Failed to create token: %v", err)
+	}
+
+	// Act: Validate the token
+	validatedID, err := ValidateJWT(token, secret)
+
+	// Assert: Verify validation results
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	if validatedID != userID {
+		t.Fatalf("Expected userID %v, got %v", userID, validatedID)
+	}
+}
+
+// TestValidateJWT_InvalidToken tests rejection of malformed tokens.
+// Ensures the validation function properly rejects invalid token formats.
+//
+// PRODUCTION IMPROVEMENTS:
+// - Test various types of malformed tokens
+// - Test tokens with modified signatures
+// - Test tokens with invalid JSON in claims
+// - Verify specific error types are returned
+func TestValidateJWT_InvalidToken(t *testing.T) {
+	// Arrange: Use obviously invalid token
+	secret := "test-secret"
+	invalidToken := "invalid.token.here"
+
+	// Act: Attempt to validate invalid token
+	_, err := ValidateJWT(invalidToken, secret)
+
+	// Assert: Should return error
+	if err == nil {
+		t.Fatal("Expected error for invalid token")
+	}
+
+	// PRODUCTION: Verify specific error type
+	// if !errors.Is(err, jwt.ErrTokenMalformed) {
+	//     t.Fatalf("Expected malformed token error, got %v", err)
+	// }
+}
+
+// TestValidateJWT_ExpiredToken tests rejection of expired tokens.
+// Verifies that tokens past their expiration time are properly rejected.
+//
+// PRODUCTION IMPROVEMENTS:
+// - Test tokens that expire during validation
+// - Test with different clock skew scenarios
+// - Verify grace period handling if implemented
+// - Test with tokens that are not yet valid (nbf claim)
+func TestValidateJWT_ExpiredToken(t *testing.T) {
+	// Arrange: Create token that's already expired
+	userID := uuid.New()
+	secret := "test-secret"
+	expiresIn := -time.Hour // Negative duration = already expired
+
+	token, err := MakeJWT(userID, secret, expiresIn)
+	if err != nil {
+		t.Fatalf("Failed to create token: %v", err)
+	}
+
+	// Act: Attempt to validate expired token
+	_, err = ValidateJWT(token, secret)
+
+	// Assert: Should return error for expired token
+	if err == nil {
+		t.Fatal("Expected error for expired token")
+	}
+
+	// PRODUCTION: Verify specific error type
+	// if !errors.Is(err, jwt.ErrTokenExpired) {
+	//     t.Fatalf("Expected expired token error, got %v", err)
+	// }
+}
+
+// TestValidateJWT_WrongSecret tests rejection of tokens signed with different secrets.
+// Ensures that signature validation properly prevents token tampering.
+//
+// PRODUCTION IMPROVEMENTS:
+// - Test with secrets that are similar but not identical
+// - Test with empty secrets
+// - Test with very long secrets
+// - Verify timing attack resistance
+func TestValidateJWT_WrongSecret(t *testing.T) {
+	// Arrange: Create token with one secret, validate with another
+	userID := uuid.New()
+	secret := "test-secret"
+	wrongSecret := "wrong-secret"
+	expiresIn := time.Hour
+
+	token, err := MakeJWT(userID, secret, expiresIn)
+	if err != nil {
+		t.Fatalf("Failed to create token: %v", err)
+	}
+
+	// Act: Attempt to validate with wrong secret
+	_, err = ValidateJWT(token, wrongSecret)
+
+	// Assert: Should return error for wrong signature
+	if err == nil {
+		t.Fatal("Expected error for wrong secret")
+	}
+
+	// PRODUCTION: Verify specific error type
+	// if !errors.Is(err, jwt.ErrSignatureInvalid) {
+	//     t.Fatalf("Expected signature invalid error, got %v", err)
+	// }
+}
+
+// PRODUCTION: Add additional test cases
+//
+// func TestHashPassword(t *testing.T) {
+//     // Test password hashing functionality
+// }
+//
+// func TestCheckHashPassword(t *testing.T) {
+//     // Test password verification
+// }
+//
+// func TestGetBearerToken(t *testing.T) {
+//     // Test HTTP header parsing
+// }
+//
+// func TestMakeRefreshToken(t *testing.T) {
+//     // Test refresh token generation
+// }
+//
+// func BenchmarkMakeJWT(b *testing.B) {
+//     // Performance benchmarks
+// }
+//
+// func BenchmarkValidateJWT(b *testing.B) {
+//     // Performance benchmarks
+// }

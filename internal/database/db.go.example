@@ -1,0 +1,77 @@
+// Package database provides database connection and query management for the Chirpy application.
+// This file contains the core database connection setup and query interface initialization.
+//
+// PRODUCTION CONSIDERATIONS:
+// - Implement connection pooling with proper limits
+// - Add connection health checks and automatic reconnection
+// - Implement database migration management
+// - Add query performance monitoring and logging
+// - Consider implementing read/write database splitting for scalability
+// - Add proper transaction management for complex operations
+package database
+
+import (
+	"database/sql"
+)
+
+// Queries wraps the database connection and provides access to all generated query methods.
+// This struct is created by sqlc and contains methods for all SQL queries defined in the queries/ directory.
+//
+// PRODUCTION IMPROVEMENTS:
+// - Add connection pooling configuration
+// - Implement query timeout management
+// - Add query performance metrics collection
+// - Consider implementing query result caching for frequently accessed data
+// - Add database health check methods
+type Queries struct {
+	db *sql.DB
+}
+
+// New creates a new Queries instance with the provided database connection.
+// This function initializes the query interface that will be used throughout the application
+// to interact with the PostgreSQL database.
+//
+// PRODUCTION IMPROVEMENTS:
+// - Add connection validation before returning
+// - Implement connection pool configuration
+// - Add database schema version validation
+// - Consider adding connection retry logic
+//
+// Parameters:
+//   - db: Active database connection (should be tested with Ping() before use)
+// Returns:
+//   - *Queries: Interface for executing database operations
+func New(db *sql.DB) *Queries {
+	return &Queries{db: db}
+}
+
+// PRODUCTION NOTES:
+// 
+// Connection Pool Configuration:
+// - Set MaxOpenConns based on database server capacity
+// - Configure MaxIdleConns to balance resource usage and performance
+// - Set ConnMaxLifetime to handle connection recycling
+// - Monitor connection pool metrics in production
+//
+// Example production configuration:
+// db.SetMaxOpenConns(25)
+// db.SetMaxIdleConns(5)
+// db.SetConnMaxLifetime(5 * time.Minute)
+//
+// Error Handling:
+// - Implement proper error classification (temporary vs permanent)
+// - Add retry logic for transient database errors
+// - Log database errors with appropriate context
+// - Consider implementing circuit breaker pattern for database failures
+//
+// Security:
+// - Ensure all queries use parameterized statements (handled by sqlc)
+// - Implement proper access controls at database level
+// - Add query audit logging for sensitive operations
+// - Consider implementing query result encryption for sensitive data
+//
+// Performance:
+// - Monitor slow query logs
+// - Implement query result caching where appropriate
+// - Consider implementing database sharding for high-scale applications
+// - Add database connection and query metrics to monitoring systems

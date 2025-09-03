@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -25,6 +26,7 @@ type apiConfig struct {
 	platform string
 	secretKey string
 	userId uuid.UUID
+	polkaKey string
 }
 
 type User struct {
@@ -34,6 +36,7 @@ type User struct {
 	Email     string    `json:"email"`
 	Token	  string	`json:"token"`
 	RefreshToken string `json:"refresh_token"`
+	IsChirpyRed bool 	`json:"is_chirpy_red"`
 }
 
 func main() {
@@ -42,13 +45,14 @@ func main() {
 	dbURL := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
 	secretKey := os.Getenv("JWT_SECRET_KEY")
+	polkaKey := os.Getenv("POLKA_KEY")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		log.Fatal(err)
 	}
 	dbQueries := database.New(db)
 	// Initialize application configuration with database queries
-	apiCfg := &apiConfig{databaseQueries: dbQueries, platform: platform, secretKey: secretKey}
+	apiCfg := &apiConfig{databaseQueries: dbQueries, platform: platform, secretKey: secretKey, polkaKey: polkaKey}
 	// Set up HTTP router and register route handlers
 	mux := http.NewServeMux()
 	mux.Handle("/app/", http.StripPrefix("/app", apiCfg.middlewareMetricsInc(http.FileServer(http.Dir(".")))))
@@ -62,6 +66,7 @@ func main() {
 	mux.HandleFunc("POST /api/users", apiCfg.handlerRegister)
 	mux.HandleFunc("POST /api/login", apiCfg.handlerLogin)
 	mux.HandleFunc("PUT /api/users", apiCfg.handlerPutUsers)
+	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.handlerPolkaWebhook)
 	mux.HandleFunc("POST /api/refresh", apiCfg.handlerRefresh)
 	mux.HandleFunc("POST /api/revoke", apiCfg.handlerRevoke)
 	// Configure and start HTTP server
@@ -266,6 +271,7 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt: user.UpdatedAt,
 		Token: token,
 		RefreshToken: refreshTokenString,
+		IsChirpyRed: user.IsChirpyRed,
 	}
 	cfg.userId = user.ID
 	// Marshal response to JSON
@@ -314,6 +320,7 @@ func (cfg *apiConfig) handlerRegister(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
 		Email:     user.Email,
+		IsChirpyRed: user.IsChirpyRed,
 	}
 	cfg.userId = user.ID
 	newUser, err := json.Marshal(data)
@@ -328,22 +335,38 @@ func (cfg *apiConfig) handlerRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
-	tokenAuth, err := auth.GetBearerToken(r.Header)
-	if err != nil {
-		log.Printf("Error getting bearer token (handlerGetChirps): %s", err.Error())
-		marshallError(w, err, 401)
+	authorIdQuery := r.URL.Query().Get("author_id")
+	var chirps []database.Chirp
+	var err error
+	if authorIdQuery != "" {
+		authorId, err := uuid.Parse(authorIdQuery)
+		if err != nil {
+			log.Printf("Query for author id invalid - omitting query")
+			chirps, err = cfg.databaseQueries.GetChirps(r.Context())
+			if err != nil {
+				log.Printf("Error getting chirps: %s", err.Error())
+				marshallError(w, err, 404)
+				return
+			}
+			
+		} else {
+			chirps, err = cfg.databaseQueries.GetChirpsById(r.Context(), authorId)
+			if err != nil {
+				log.Printf("Error getting chirps from database: %s", err.Error())
+				marshallError(w, err, 404)
+			}
+		}
+	} else {
+		chirps, err = cfg.databaseQueries.GetChirps(r.Context())
+		if err != nil {
+			log.Printf("Error getting chirps: %s", err.Error())
+			marshallError(w, err, 404)
+			return
+		}
 	}
-	_, err = auth.ValidateJWT(tokenAuth, cfg.secretKey)
-	if err != nil {
-		log.Printf("Error validating JWT token: %s", err.Error())
-		marshallError(w, err, 401)
-		return
-	}
-	chirps, err := cfg.databaseQueries.GetChirps(r.Context())
-	if err != nil {
-		log.Printf("Error getting chirps: %s", err.Error())
-		marshallError(w, err, 404)
-		return
+	sortQuery := r.URL.Query().Get("sort")
+	if sortQuery == "desc" {
+		slices.Reverse(chirps)
 	}
 	type responseItem struct {
 		ID uuid.UUID `json:"id"`
@@ -555,6 +578,52 @@ func (cfg *apiConfig) handlerDeleteChirp (w http.ResponseWriter, r *http.Request
 	if err != nil {
 		log.Printf("Error deleting chirp: %s", err.Error())
 		marshallError(w, err, 500)
+		return
+	}
+	w.WriteHeader(204)
+}
+
+func (cfg *apiConfig) handlerPolkaWebhook (w http.ResponseWriter, r *http.Request) {
+	apiKey, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		log.Printf("Error retrieving api key from webhook: %s", err.Error())
+		marshallError(w, err, 401)
+		return
+	}
+	if apiKey != cfg.polkaKey {
+		log.Printf("invalid api key received from webhook")
+		marshallError(w, nil, 401)
+		return
+	}
+	type parameters struct{
+		Event string `json:"event"`
+		Data struct{
+			UserId string `json:"user_id"`
+		} `json:"data"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	req := parameters{}
+	err = decoder.Decode(&req)
+	if err != nil {
+		log.Printf("Error decoding webhook parameters: %s", err.Error())
+		marshallError(w, err, 500)
+		return
+	}
+	if req.Event != "user.upgraded" {
+		log.Printf("Received invalid event from webhook")
+		w.WriteHeader(204)
+		return
+	}
+	userId, err := uuid.Parse(req.Data.UserId)
+	if err != nil {
+		log.Printf("Invalid user_id in webhook request: %s", err.Error())
+		marshallError(w, err, 500)
+		return
+	}
+	_, err = cfg.databaseQueries.UpgradeUserById(r.Context(), userId)
+	if err != nil {
+		log.Printf("Error updating user in webhook request: %s", err.Error())
+		marshallError(w, err, 404)
 		return
 	}
 	w.WriteHeader(204)

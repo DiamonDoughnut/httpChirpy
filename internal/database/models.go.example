@@ -1,0 +1,108 @@
+// Package database contains the data models and structures used throughout the Chirpy application.
+// This file defines the core data structures that represent database tables and are used
+// for data transfer between the database layer and application logic.
+//
+// PRODUCTION CONSIDERATIONS:
+// - Implement proper data validation at the model level
+// - Add JSON serialization tags for API responses
+// - Consider implementing model versioning for API compatibility
+// - Add proper null handling for optional fields
+// - Implement data sanitization methods
+// - Consider adding model-level business logic validation
+package database
+
+import (
+	"time"
+	"github.com/google/uuid"
+)
+
+// User represents a user account in the system.
+// This model corresponds to the 'users' table in the database and contains
+// all user-related information including authentication data.
+//
+// PRODUCTION IMPROVEMENTS:
+// - Add email validation methods
+// - Implement password strength validation
+// - Add user role/permission fields
+// - Consider adding user preferences/settings
+// - Add account status fields (active, suspended, etc.)
+// - Implement user profile information (name, avatar, etc.)
+type User struct {
+	ID             uuid.UUID `json:"id"`              // Unique user identifier (primary key)
+	CreatedAt      time.Time `json:"created_at"`      // Account creation timestamp
+	UpdatedAt      time.Time `json:"updated_at"`      // Last account modification timestamp
+	Email          string    `json:"email"`           // User's email address (unique, used for login)
+	HashedPassword string    `json:"-"`               // Bcrypt hashed password (never serialized to JSON)
+	IsChirpyRed    bool      `json:"is_chirpy_red"`   // Premium subscription status
+}
+
+// Chirp represents a message/post in the system.
+// This model corresponds to the 'chirps' table and contains the content
+// and metadata for user-generated messages.
+//
+// PRODUCTION IMPROVEMENTS:
+// - Add content moderation status fields
+// - Implement chirp categories/tags
+// - Add media attachment support
+// - Consider adding edit history tracking
+// - Add engagement metrics (likes, shares, etc.)
+// - Implement chirp threading/reply functionality
+type Chirp struct {
+	ID        uuid.UUID `json:"id"`         // Unique chirp identifier (primary key)
+	CreatedAt time.Time `json:"created_at"` // Chirp creation timestamp
+	UpdatedAt time.Time `json:"updated_at"` // Last chirp modification timestamp
+	Body      string    `json:"body"`       // Chirp content (max 140 characters)
+	UserID    uuid.UUID `json:"user_id"`    // Foreign key to users table (chirp author)
+}
+
+// RefreshToken represents a long-lived authentication token.
+// This model corresponds to the 'refresh_tokens' table and is used
+// to manage user session persistence and JWT token renewal.
+//
+// PRODUCTION IMPROVEMENTS:
+// - Add device/client identification fields
+// - Implement token family tracking for security
+// - Add geolocation tracking for security monitoring
+// - Consider adding token usage statistics
+// - Implement automatic token cleanup for expired tokens
+// - Add token rotation capabilities
+type RefreshToken struct {
+	Token     string    `json:"token"`      // Unique refresh token string (primary key)
+	CreatedAt time.Time `json:"created_at"` // Token creation timestamp
+	UpdatedAt time.Time `json:"updated_at"` // Last token update timestamp
+	UserID    uuid.UUID `json:"user_id"`    // Foreign key to users table (token owner)
+	ExpiresAt time.Time `json:"expires_at"` // Token expiration timestamp
+	RevokedAt *time.Time `json:"revoked_at"` // Token revocation timestamp (null if active)
+}
+
+// PRODUCTION NOTES:
+//
+// Data Validation:
+// - Implement validation methods for each model (ValidateEmail, ValidateChirpContent, etc.)
+// - Add business rule validation (e.g., chirp length limits, email format)
+// - Consider using validation libraries like go-playground/validator
+// - Implement custom validation for complex business rules
+//
+// Security Considerations:
+// - Never expose HashedPassword in JSON responses (use json:"-" tag)
+// - Implement proper data sanitization for user inputs
+// - Add rate limiting fields if needed (e.g., last_login_attempt)
+// - Consider adding security audit fields (last_password_change, etc.)
+//
+// Performance Optimizations:
+// - Add database indexes for frequently queried fields
+// - Consider implementing soft deletes instead of hard deletes
+// - Add caching strategies for frequently accessed data
+// - Implement pagination support for large result sets
+//
+// API Compatibility:
+// - Use consistent JSON field naming conventions
+// - Consider implementing API versioning in model serialization
+// - Add omitempty tags for optional fields
+// - Implement custom JSON marshaling for complex fields
+//
+// Database Relationships:
+// - Ensure proper foreign key constraints are defined
+// - Consider adding cascade delete rules where appropriate
+// - Implement proper indexing for foreign key relationships
+// - Add database-level constraints for data integrity

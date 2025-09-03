@@ -1,0 +1,221 @@
+// Package auth provides authentication and authorization utilities for the Chirpy application.
+// This package handles password hashing, JWT token creation/validation, and HTTP header parsing.
+//
+// PRODUCTION CONSIDERATIONS:
+// - Implement token blacklisting for logout functionality
+// - Add token refresh rotation for enhanced security
+// - Consider using asymmetric keys (RS256) for JWT signing in distributed systems
+// - Implement proper key rotation mechanisms
+// - Add audit logging for authentication events
+// - Consider implementing OAuth2/OpenID Connect for third-party authentication
+package auth
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
+)
+
+// HashPassword creates a bcrypt hash of the provided password.
+// Uses bcrypt's default cost factor (currently 10) which provides a good balance
+// between security and performance for most applications.
+//
+// PRODUCTION IMPROVEMENTS:
+// - Consider using a higher cost factor (12-14) for better security
+// - Implement password strength validation before hashing
+// - Add rate limiting to prevent brute force attacks
+// - Consider using Argon2 for new applications (more modern algorithm)
+//
+// Parameters:
+//   - password: Plain text password to hash
+// Returns:
+//   - Bcrypt hash string
+//   - Error if hashing fails
+func HashPassword(password string) (string, error) {
+	// Generate bcrypt hash with default cost (10)
+	// PRODUCTION: Consider increasing cost to 12-14 for better security
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	return string(hashedPassword), nil
+}
+
+// CheckHashPassword verifies a plain text password against a bcrypt hash.
+// This function is used during login to validate user credentials.
+//
+// PRODUCTION IMPROVEMENTS:
+// - Add timing attack protection (constant-time comparison)
+// - Implement account lockout after failed attempts
+// - Add logging for failed authentication attempts
+// - Consider implementing CAPTCHA after multiple failures
+//
+// Parameters:
+//   - password: Plain text password to verify
+//   - hash: Bcrypt hash to compare against
+// Returns:
+//   - nil if password matches, error if not
+func CheckHashPassword(password, hash string) error {
+	// Compare password with hash using bcrypt's secure comparison
+	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+	if err != nil {
+		return err // Returns bcrypt.ErrMismatchedHashAndPassword if invalid
+	}
+	return nil
+}
+
+// MakeJWT creates a signed JWT token for user authentication.
+// Uses HMAC-SHA256 signing method with registered claims for standard compliance.
+//
+// PRODUCTION IMPROVEMENTS:
+// - Use RS256 (asymmetric) for distributed systems
+// - Add custom claims for roles/permissions
+// - Implement shorter expiration times (15-30 minutes)
+// - Add jti (JWT ID) claim for token blacklisting
+// - Include audience claim for multi-service environments
+//
+// Parameters:
+//   - userID: Unique identifier for the user
+//   - tokenSecret: Secret key for HMAC signing
+//   - expiresIn: Token validity duration
+// Returns:
+//   - Signed JWT token string
+//   - Error if token creation fails
+func MakeJWT(userID uuid.UUID, tokenSecret string, expiresIn time.Duration) (string, error) {
+	// Create JWT with standard registered claims
+	now := time.Now().UTC()
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
+		Issuer:    "chirpy",                              // Token issuer
+		IssuedAt:  jwt.NewNumericDate(now),               // Issue time
+		ExpiresAt: jwt.NewNumericDate(now.Add(expiresIn)), // Expiration time
+		Subject:   userID.String(),                       // User identifier
+		// PRODUCTION: Add NotBefore, Audience, and JTI claims
+	})
+
+	// Sign token with secret key
+	signedToken, err := token.SignedString([]byte(tokenSecret))
+	if err != nil {
+		return "", err
+	}
+	return signedToken, nil
+}
+
+// ValidateJWT parses and validates a JWT token, returning the user ID.
+// Verifies token signature, expiration, and extracts the user ID from the subject claim.
+//
+// PRODUCTION IMPROVEMENTS:
+// - Add token blacklist checking
+// - Validate additional claims (audience, issuer)
+// - Implement clock skew tolerance
+// - Add comprehensive error types for different failure modes
+// - Log validation attempts for security monitoring
+//
+// Parameters:
+//   - tokenString: JWT token to validate
+//   - tokenSecret: Secret key for signature verification
+// Returns:
+//   - User UUID from token subject
+//   - Error if validation fails
+func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
+	// Parse token with registered claims
+	claims := &jwt.RegisteredClaims{}
+	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (any, error) {
+		// Verify signing method to prevent algorithm confusion attacks
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(tokenSecret), nil
+	})
+
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	// Verify token validity (signature and expiration)
+	if !token.Valid {
+		return uuid.Nil, jwt.ErrTokenInvalidClaims
+	}
+
+	// Extract user ID from subject claim
+	subject, err := claims.GetSubject()
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	// Parse subject as UUID
+	userId, err := uuid.Parse(subject)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("invalid user ID in token: %w", err)
+	}
+
+	return userId, nil
+}
+
+// GetBearerToken extracts a Bearer token from HTTP Authorization header.
+// Validates the header format and returns the token string without the "Bearer " prefix.
+// Also trims any extra whitespace that might be present.
+//
+// PRODUCTION IMPROVEMENTS:
+// - Add support for multiple authentication schemes
+// - Implement case-insensitive header parsing
+// - Add token format validation (basic structure check)
+// - Log invalid authentication attempts
+//
+// Parameters:
+//   - headers: HTTP headers from the request
+// Returns:
+//   - Token string without "Bearer " prefix and trimmed of whitespace
+//   - Error if header is missing or malformed
+func GetBearerToken(headers http.Header) (string, error) {
+	// Extract Authorization header
+	header := headers.Get("Authorization")
+	if header == "" || !strings.HasPrefix(header, "Bearer ") {
+		return "", fmt.Errorf("invalid authorization header")
+	}
+
+	// Extract token (everything after "Bearer ") and trim whitespace
+	token := strings.TrimPrefix(header, "Bearer ")
+	token = strings.TrimLeft(token, " ")
+	token = strings.TrimRight(token, " ")
+
+	if token == "" {
+		return "", fmt.Errorf("empty bearer token")
+	}
+
+	return token, nil
+}
+
+// MakeRefreshToken generates a cryptographically secure random refresh token.
+// Creates a 32-byte random token and encodes it as a hexadecimal string.
+// Refresh tokens are used to obtain new JWT access tokens without re-authentication.
+//
+// PRODUCTION IMPROVEMENTS:
+// - Consider using base64url encoding for shorter tokens
+// - Implement token rotation (invalidate old token when issuing new one)
+// - Add token family tracking to detect token theft
+// - Store token metadata (creation time, device info) in database
+// - Implement automatic cleanup of expired tokens
+//
+// Returns:
+//   - 64-character hexadecimal refresh token
+//   - Error if random generation fails
+func MakeRefreshToken() (string, error) {
+	// Generate 32 bytes of cryptographically secure random data
+	token := make([]byte, 32)
+	_, err := rand.Read(token)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate random token: %w", err)
+	}
+
+	// Encode as hexadecimal string (64 characters)
+	// PRODUCTION: Consider base64url for shorter tokens
+	refreshToken := hex.EncodeToString(token)
+	return refreshToken, nil
+}
